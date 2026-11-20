@@ -7,6 +7,7 @@
 // JSON for primitives, text-keyed maps and arrays, and uses `@cbor` sentinel objects otherwise:
 //   - `{ "@cbor": "bytes", "hex": "..." }`
 //   - `{ "@cbor": "int",   "value": "..." }`   (integers outside i64/u64)
+//   - `{ "@cbor": "float", "value": "inf" | "-inf" | "nan" }`   (non-finite floats)
 //   - `{ "@cbor": "map",   "entries": [[k, v], ...] }`
 //   - `{ "@cbor": "tag",   "tag": N, "value": v }`
 //
@@ -22,6 +23,7 @@ export const CBOR_SENTINEL_BYTES = "bytes";
 export const CBOR_SENTINEL_INT = "int";
 export const CBOR_SENTINEL_MAP = "map";
 export const CBOR_SENTINEL_TAG = "tag";
+export const CBOR_SENTINEL_FLOAT = "float";
 
 /**
  * Decode `BinaryTag(N, value)` into a domain-specific representation. Receives the tag number
@@ -41,6 +43,7 @@ export interface DecodeCborJsonOptions {
  * - primitives, arrays, and text-keyed objects pass through (after recursive decoding);
  * - `{ "@cbor": "bytes", hex }` → `number[]` of byte values;
  * - `{ "@cbor": "int", value }` → `number` when safe, otherwise `BigInt`;
+ * - `{ "@cbor": "float", value }` → `Infinity`, `-Infinity` or `NaN`;
  * - `{ "@cbor": "map", entries }` → plain object (keys coerced via `String(decoded)`);
  * - `{ "@cbor": "tag", tag, value }` → whatever `opts.onTag` returns.
  *
@@ -135,8 +138,23 @@ function walkSentinel(value: Record<string, any>, onTag: CborTagHandler): any {
     }
     case CBOR_SENTINEL_TAG:
       return onTag(value.tag, walk(value.value, onTag));
+    case CBOR_SENTINEL_FLOAT:
+      return decodeNonFiniteFloat(value.value);
     default:
       return value;
+  }
+}
+
+function decodeNonFiniteFloat(name: string): number {
+  switch (name) {
+    case "inf":
+      return Infinity;
+    case "-inf":
+      return -Infinity;
+    case "nan":
+      return NaN;
+    default:
+      throw new Error(`@cbor:float value must be "inf", "-inf" or "nan", got ${JSON.stringify(name)}`);
   }
 }
 

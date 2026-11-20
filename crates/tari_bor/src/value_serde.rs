@@ -16,7 +16,7 @@
 //! | `Bool(b)` | bool |
 //! | `Integer(i)` (fits in i64) | number |
 //! | `Integer(i)` (fits in u64 but not i64) | number |
-//! | `Float(f)` | number |
+//! | `Float(f)` (finite) | number |
 //! | `Text(s)` | string |
 //! | `Array(a)` | array |
 //! | `Map(m)` where every key is `Text` and none is reserved | object |
@@ -28,6 +28,7 @@
 //! |---------|------|
 //! | `Bytes(b)` | `{ "@cbor": "bytes", "hex": "ab12.." }` |
 //! | `Integer(i)` (outside i64/u64 range) | `{ "@cbor": "int", "value": "12345" }` |
+//! | `Float(f)` (infinite or NaN) | `{ "@cbor": "float", "value": "inf" \| "-inf" \| "nan" }` |
 //! | `Map(m)` with a non-text or reserved key | `{ "@cbor": "map", "entries": [[k, v], ...] }` |
 //! | `Tag(t, v)` | `{ "@cbor": "tag", "tag": N, "value": v }` |
 //!
@@ -63,6 +64,18 @@ const SENTINEL_BYTES: &str = "bytes";
 const SENTINEL_INT: &str = "int";
 const SENTINEL_MAP: &str = "map";
 const SENTINEL_TAG: &str = "tag";
+const SENTINEL_FLOAT: &str = "float";
+
+/// JSON has no number for infinity or NaN, so these floats go through the `@cbor:float` sentinel.
+fn non_finite_float_name(f: f64) -> &'static str {
+    if f.is_nan() {
+        "nan"
+    } else if f.is_sign_positive() {
+        "inf"
+    } else {
+        "-inf"
+    }
+}
 
 /// With `serde_json/arbitrary_precision` enabled, numbers are encoded as a one-entry map
 /// keyed on this sentinel string and a stringified value. Any workspace member can light
@@ -86,6 +99,12 @@ impl Serialize for Value {
                     m.serialize_entry("value", &i.to_string())?;
                     m.end()
                 }
+            },
+            Value::Float(f) if s.is_human_readable() && !f.is_finite() => {
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry(SENTINEL_KEY, SENTINEL_FLOAT)?;
+                m.serialize_entry("value", non_finite_float_name(*f))?;
+                m.end()
             },
             Value::Float(f) => s.serialize_f64(*f),
             Value::Bytes(b) => {
@@ -338,6 +357,25 @@ fn decode_sentinel<'de, A: MapAccess<'de>>(kind: &str, map: &mut A, depth: usize
             let tag = tag.ok_or_else(|| de::Error::custom("missing 'tag' in @cbor:tag"))?;
             let value = value.ok_or_else(|| de::Error::custom("missing 'value' in @cbor:tag"))?;
             Ok(Value::Tag(tag, Box::new(value)))
+        },
+        SENTINEL_FLOAT => {
+            let mut value_str: Option<String> = None;
+            while let Some(k) = map.next_key::<String>()? {
+                if k == "value" {
+                    value_str = Some(map.next_value()?);
+                } else {
+                    map.next_value_seed(BoundedIgnoredAny { depth: depth + 1 })?;
+                }
+            }
+            let s = value_str.ok_or_else(|| de::Error::custom("missing 'value' in @cbor:float"))?;
+            match s.as_str() {
+                "inf" => Ok(Value::Float(f64::INFINITY)),
+                "-inf" => Ok(Value::Float(f64::NEG_INFINITY)),
+                "nan" => Ok(Value::Float(f64::NAN)),
+                other => Err(de::Error::custom(format!(
+                    "@cbor:float value must be \"inf\", \"-inf\" or \"nan\", got {other:?}"
+                ))),
+            }
         },
         other => Err(de::Error::custom(format!("unknown @cbor sentinel kind: {other}"))),
     }
@@ -697,6 +735,28 @@ mod tests {
         assert!(json.contains("@cbor"));
         assert!(json.contains("bytes"));
         assert_eq!(json_roundtrip(&v), v);
+    }
+
+    #[test]
+    fn non_finite_floats_use_sentinel_and_round_trip() {
+        for f in [f64::INFINITY, f64::NEG_INFINITY] {
+            let v = Value::Float(f);
+            let json = serde_json::to_string(&v).unwrap();
+            assert!(json.contains("@cbor"), "{json}");
+            assert_eq!(json_roundtrip(&v), v);
+            let in_map = Value::Map(vec![(Value::Text("x".into()), v.clone())]);
+            assert_eq!(json_roundtrip(&in_map), in_map);
+        }
+
+        let json = serde_json::to_string(&Value::Float(f64::NAN)).unwrap();
+        assert!(json.contains("@cbor"), "{json}");
+        assert!(matches!(json_roundtrip(&Value::Float(f64::NAN)), Value::Float(f) if f.is_nan()));
+    }
+
+    #[test]
+    fn the_float_sentinel_rejects_an_unknown_value() {
+        let json = serde_json::json!({ SENTINEL_KEY: "float", "value": "1.5" });
+        assert!(serde_json::from_value::<Value>(json).is_err());
     }
 
     #[test]

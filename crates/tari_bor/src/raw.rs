@@ -214,6 +214,9 @@ mod tests {
             ]),
             Value::Tag(42, Box::new(Value::Integer(7))),
             Value::Tag(42, Box::new(Value::Bytes(vec![1, 2, 3]))),
+            Value::Float(f64::INFINITY),
+            Value::Float(f64::NEG_INFINITY),
+            Value::Float(f64::NAN),
         ] {
             let raw = RawCbor::from_value(&value).unwrap();
             assert_eq!(
